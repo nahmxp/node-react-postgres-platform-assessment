@@ -1,0 +1,15 @@
+# Non-sensitive configuration shared by the backend (and worker).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: dev
+  labels:
+    app.kubernetes.io/part-of: node-react-platform
+data:
+  PORT: "4000"
+  NODE_ENV: "production"
+  # Internal DNS names of ClusterIP services (short names resolve inside "dev").
+  DB_HOST: "postgres-service"
+  DB_PORT: "5432"
+  DB_NAME: "appdb"
