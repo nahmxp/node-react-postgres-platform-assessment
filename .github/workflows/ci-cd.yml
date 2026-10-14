@@ -35,7 +35,8 @@ env:
 jobs:
   # ---------------------------------------------------------------- CI ----
   build-and-test:
-    if: github.event_name != 'workflow_dispatch'
+    # push / PR, or a manual run without rollback input (= manual redeploy)
+    if: github.event_name != 'workflow_dispatch' || inputs.rollback_namespace == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,7 +80,7 @@ jobs:
 
   # ------------------------------------------------------ build & push ----
   build-and-push:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.rollback_namespace == '')
     needs: build-and-test
     runs-on: ubuntu-latest
     outputs:
@@ -145,7 +146,7 @@ jobs:
 
   # ------------------------------------------------------------ deploy ----
   deploy:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.rollback_namespace == '')
     needs: build-and-push
     runs-on: ubuntu-latest
     # GitHub Environments: "release" can require manual approval + its own
