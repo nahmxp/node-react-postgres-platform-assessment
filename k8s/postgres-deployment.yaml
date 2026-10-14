@@ -38,6 +38,13 @@ spec:
                 secretKeyRef: { name: app-secrets, key: DB_PASSWORD }
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+          # initdb / crash recovery can be slow on a busy node: give it up to
+          # 5 min before liveness is allowed to kill the container.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
