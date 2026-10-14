@@ -45,6 +45,12 @@ spec:
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef: { name: app-secrets, key: DB_PASSWORD }
+            # $(VAR) expansion builds the URLs from the secret at runtime, so
+            # credentials never appear in the ConfigMap.
+            - name: DB_WRITE_URL
+              value: postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_WRITE_HOST):$(DB_PORT)/$(DB_NAME)
+            - name: DB_READ_URL
+              value: postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_READ_HOST):$(DB_PORT)/$(DB_NAME)
           # Readiness = "can I serve traffic?" (checks the DB). A failing pod is
           # removed from the Service endpoints but NOT restarted.
           readinessProbe:

@@ -13,3 +13,9 @@ data:
   DB_HOST: "postgres-service"
   DB_PORT: "5432"
   DB_NAME: "appdb"
+  # Simulated read/write cluster: writer and reader are separate endpoints.
+  DB_WRITE_HOST: "postgres-service"
+  DB_READ_HOST: "postgres-read-service"
+  # Platform services (Task 5) - all ClusterIP, never exposed outside.
+  REDIS_URL: "redis://redis-service:6379"
+  SEARCH_URL: "http://search-service:9200"

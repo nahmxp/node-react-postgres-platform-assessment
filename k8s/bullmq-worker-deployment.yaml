@@ -1,0 +1,38 @@
+# BullMQ worker: same image as the API, different entrypoint. Runs as its own
+# Deployment so it scales and fails independently of request serving.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bullmq-worker
+  namespace: dev
+  labels:
+    app: bullmq-worker
+    tier: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bullmq-worker
+  template:
+    metadata:
+      labels:
+        app: bullmq-worker
+        tier: worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: worker
+          image: ghcr.io/nahmxp/node-react-postgres-platform-assessment-backend:local
+          imagePullPolicy: IfNotPresent
+          command: ["node", "src/worker.js"]
+          envFrom:
+            - configMapRef:
+                name: app-config
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits: { cpu: 250m, memory: 192Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true

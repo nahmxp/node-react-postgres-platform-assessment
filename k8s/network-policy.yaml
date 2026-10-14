@@ -1,0 +1,22 @@
+# Platform services stay internal: only app pods in "dev" may talk to the
+# database, Redis and search. (Enforced by CNIs that support NetworkPolicy,
+# e.g. Calico/Cilium; kind's default kindnet ignores it.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-services-internal
+  namespace: dev
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [postgres, redis, search]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [backend, bullmq-worker]
