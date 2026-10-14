@@ -7,6 +7,12 @@ x-db-env: &db-env
   DB_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
   DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
   DB_NAME: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+  # Simulated read/write cluster: "postgres-replica" is a network alias of the
+  # same container today; point it at a real replica later with no code change.
+  DB_WRITE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  DB_READ_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-replica:5432/${POSTGRES_DB}
+  REDIS_URL: redis://redis:6379
+  SEARCH_URL: http://search:9200
 
 services:
   postgres:
@@ -20,7 +26,9 @@ services:
       - postgres_data:/var/lib/postgresql/data   # survives container restarts / `down`
     ports:
       - "127.0.0.1:${DB_PORT:-5432}:5432"          # host access for debugging only
-    networks: [backend-net]
+    networks:
+      backend-net:
+        aliases: [postgres-replica]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -41,7 +49,46 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     networks: [backend-net, frontend-net]
+
+  # ---- Task 5: platform services (internal only - no published ports) ----
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks: [backend-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    image: node-react-backend:local          # same image as the API
+    command: ["node", "src/worker.js"]
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      backend:
+        condition: service_started           # ensures the image is built first
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    networks: [backend-net]
+
+  search:
+    image: opensearchproject/opensearch:2.15.0
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"        # dev only; acceptable because not exposed
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    networks: [backend-net]
 
   frontend:
     build:
