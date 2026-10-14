@@ -496,11 +496,15 @@ for i in $(seq 1 300); do curl -s -o /dev/null -w "%{http_code}\n" http://node-r
 
 ## Evidence (`docs/`)
 
+All captured from the running local environment (kind cluster `node-react`, Docker Compose).
+
 | Screenshot | What it shows |
 |-----------|---------------|
-| `docs/kubectl-get-all-dev.png` | `kubectl get all -n dev` |
-| `docs/app-node-react-local.png` | App running at http://node-react.local |
-| `docs/grafana-dashboard.png` | Backend Overview dashboard |
-| `docs/loki-logs.png` | Loki log query in Grafana Explore |
-| `docs/github-actions.png` | Passing GitHub Actions run |
-| `docs/compose-up.png` | `docker compose ps` / Compose stack healthy |
+| [`kubectl-get-all-dev.png`](docs/kubectl-get-all-dev.png) | `kubectl get all -n dev` + ingress/PVC/configmap/secret |
+| [`app-node-react-local.png`](docs/app-node-react-local.png) | App served at http://node-react.local through ingress-nginx (items written to Postgres) |
+| [`grafana-dashboard.png`](docs/grafana-dashboard.png) | Backend Overview: CPU, memory, request rate, error rate, replicas, latency, Loki logs |
+| [`loki-log-queries.png`](docs/loki-log-queries.png) | LogQL search/filter on backend logs shipped by the Fluent Bit DaemonSet |
+| [`hpa-ratelimit-dns.png`](docs/hpa-ratelimit-dns.png) | Monitoring pods, HPA reading metrics, **429s from the ingress rate limit**, in-cluster DNS resolution |
+| [`compose-up.png`](docs/compose-up.png) | Compose stack healthy; Redis/OpenSearch health; worker consuming BullMQ jobs; image sizes |
+| [`app-compose-localhost-8080.png`](docs/app-compose-localhost-8080.png) | App via Docker Compose |
+| [`github-actions.png`](docs/github-actions.png) | GitHub Actions run (see also the repo's **Actions** tab) |
