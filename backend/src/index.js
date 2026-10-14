@@ -4,10 +4,15 @@ import { initSchema, read, write, pingWrite } from "./db.js";
 import redis from "./redisClient.js";
 import { enqueueItemCreated } from "./queue.js";
 import { searchHealth } from "./search.js";
+import { metricsMiddleware, metricsHandler } from "./metrics.js";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(metricsMiddleware);
+
+// Prometheus scrape endpoint (not routed by the Ingress, which only exposes /api).
+app.get("/metrics", metricsHandler);
 
 const PORT = process.env.PORT || 4000;
 
