@@ -1,0 +1,18 @@
+# Keep the build context small and never ship secrets or local artifacts.
+**/node_modules
+**/dist
+**/npm-debug.log*
+**/*.log
+**/.env
+**/.env.*
+!**/.env.example
+.git
+.github
+.gitignore
+k8s
+observability
+docs
+*.md
+docker-compose*.yml
+Dockerfile*
+.dockerignore
