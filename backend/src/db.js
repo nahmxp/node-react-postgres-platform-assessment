@@ -26,6 +26,12 @@ const readPool = new Pool({
     process.env.DB_READ_URL || process.env.DB_WRITE_URL || buildConnectionString(),
 });
 
+// An idle client losing its connection (e.g. Postgres restarting) emits
+// "error" on the pool; without a listener that crashes the whole process.
+for (const [name, pool] of [["write", writePool], ["read", readPool]]) {
+  pool.on("error", (err) => console.error(`${name} pool idle client error:`, err.message));
+}
+
 export async function initSchema() {
   await writePool.query(`
     CREATE TABLE IF NOT EXISTS items (
