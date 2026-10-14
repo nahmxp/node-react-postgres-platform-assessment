@@ -83,7 +83,21 @@ app.post("/api/items", async (req, res) => {
   }
 });
 
-initSchema()
+// Retry schema init so the API waits for Postgres instead of crash-looping
+// when both start at the same time (Compose up / fresh k8s namespace).
+async function initWithRetry(attempts = 30, delayMs = 2000) {
+  for (let i = 1; ; i++) {
+    try {
+      return await initSchema();
+    } catch (err) {
+      if (i >= attempts) throw err;
+      console.error(`db not ready (attempt ${i}/${attempts}): ${err.message}`);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
+initWithRetry()
   .then(() => {
     app.listen(PORT, () => console.log(`backend listening on :${PORT}`));
   })
