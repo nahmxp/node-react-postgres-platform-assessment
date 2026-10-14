@@ -1,0 +1,18 @@
+# Static hostPath PV for local kind/minikube. On a cloud cluster you would drop
+# this file and let the PVC be provisioned dynamically by a StorageClass.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: postgres-pv-dev
+  labels:
+    app: postgres
+    environment: dev
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /data/postgres-dev
+    type: DirectoryOrCreate

@@ -1,0 +1,18 @@
+# External entry point without Ingress: http://localhost:30080 (kind port map).
+# Task 3 puts the Ingress in front of it for http://node-react.local.
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: dev
+  labels:
+    app: frontend
+spec:
+  type: NodePort
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080
