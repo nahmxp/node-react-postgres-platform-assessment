@@ -1,0 +1,20 @@
+# Simulated read replica endpoint. Today it selects the same Postgres pod as
+# postgres-service; swapping the selector to a real streaming replica (or a
+# PgBouncer/pgpool read pool) needs no app change, because the backend
+# already reads via DB_READ_URL -> postgres-read-service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-read-service
+  namespace: dev
+  labels:
+    app: postgres
+    role: read
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
