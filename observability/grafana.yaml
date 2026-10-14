@@ -1,0 +1,192 @@
+# Grafana with Prometheus + Loki datasources and the "Backend Overview"
+# dashboard provisioned from code (no manual clicking, reproducible).
+# Access: kubectl -n monitoring port-forward svc/grafana 3000:3000
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-admin
+  namespace: monitoring
+type: Opaque
+stringData:
+  # DEV-ONLY. Anonymous read-only access is enabled for local viewing.
+  admin-user: admin
+  admin-password: dev-only-change-me
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+  namespace: monitoring
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus.monitoring.svc.cluster.local:9090
+        isDefault: true
+      - name: Loki
+        uid: loki
+        type: loki
+        access: proxy
+        url: http://loki.monitoring.svc.cluster.local:3100
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: default
+        folder: Platform
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: monitoring
+data:
+  backend-overview.json: |
+    {
+      "uid": "backend-overview",
+      "title": "Backend Overview",
+      "timezone": "browser",
+      "refresh": "10s",
+      "time": { "from": "now-30m", "to": "now" },
+      "schemaVersion": 39,
+      "panels": [
+        {
+          "type": "timeseries", "title": "Backend CPU usage (cores) per pod",
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "targets": [{ "refId": "A", "legendFormat": "{{pod}}",
+            "expr": "sum by (pod) (rate(backend_process_cpu_seconds_total{app=\"backend\"}[1m]))" }]
+        },
+        {
+          "type": "timeseries", "title": "Backend memory usage (RSS) per pod",
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "targets": [{ "refId": "A", "legendFormat": "{{pod}}",
+            "expr": "sum by (pod) (backend_process_resident_memory_bytes{app=\"backend\"})" }]
+        },
+        {
+          "type": "timeseries", "title": "Request rate (req/s) by route & status",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{ "refId": "A", "legendFormat": "{{method}} {{route}} {{status}}",
+            "expr": "sum by (method, route, status) (rate(http_requests_total{app=\"backend\"}[1m]))" }]
+        },
+        {
+          "type": "timeseries", "title": "Error rate (5xx / total)",
+          "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0 } },
+          "targets": [
+            { "refId": "A", "legendFormat": "5xx ratio",
+              "expr": "sum(rate(http_requests_total{app=\"backend\",status=~\"5..\"}[1m])) / clamp_min(sum(rate(http_requests_total{app=\"backend\"}[1m])), 1e-9)" },
+            { "refId": "B", "legendFormat": "4xx ratio",
+              "expr": "sum(rate(http_requests_total{app=\"backend\",status=~\"4..\"}[1m])) / clamp_min(sum(rate(http_requests_total{app=\"backend\"}[1m])), 1e-9)" }
+          ]
+        },
+        {
+          "type": "timeseries", "title": "Backend replicas over time",
+          "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0, "decimals": 0 } },
+          "targets": [{ "refId": "A", "legendFormat": "ready backend pods",
+            "expr": "count(up{app=\"backend\"} == 1)" }]
+        },
+        {
+          "type": "timeseries", "title": "Latency p50 / p95",
+          "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "targets": [
+            { "refId": "A", "legendFormat": "p50",
+              "expr": "histogram_quantile(0.5, sum by (le) (rate(http_request_duration_seconds_bucket{app=\"backend\"}[1m])))" },
+            { "refId": "B", "legendFormat": "p95",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{app=\"backend\"}[1m])))" }
+          ]
+        },
+        {
+          "type": "logs", "title": "Backend logs (Loki)",
+          "gridPos": { "x": 0, "y": 24, "w": 24, "h": 10 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [{ "refId": "A", "expr": "{app=\"backend\"}" }]
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.2.2
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom: { secretKeyRef: { name: grafana-admin, key: admin-user } }
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: grafana-admin, key: admin-password } }
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Viewer
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: /var/lib/grafana/dashboards/backend-overview.json
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 384Mi }
+          volumeMounts:
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
+              subPath: datasources.yaml
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
+              subPath: dashboards.yaml
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+      volumes:
+        - name: provisioning
+          configMap:
+            name: grafana-provisioning
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  type: ClusterIP
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
