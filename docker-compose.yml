@@ -1,0 +1,69 @@
+# One-command local platform:  cp .env.example .env && docker compose up --build
+# Secrets come from .env (git-ignored); nothing sensitive is committed.
+
+x-db-env: &db-env
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+  DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+  DB_NAME: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   # survives container restarts / `down`
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"          # host access for debugging only
+    networks: [backend-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: node-react-backend:local
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+      PORT: "4000"
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend-net, frontend-net]
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    image: node-react-frontend:local
+    restart: unless-stopped
+    environment:
+      BACKEND_UPSTREAM: http://backend:4000   # resolved by Docker's embedded DNS
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [frontend-net]
+
+# Two networks: the frontend can reach the backend, but never the database.
+networks:
+  frontend-net:
+  backend-net:
+
+volumes:
+  postgres_data:
