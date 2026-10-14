@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+
+# ---- Stage 1: install production dependencies only ----
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY backend/package.json backend/package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# ---- Stage 2: minimal runtime image ----
+FROM node:20-alpine AS runtime
+ENV NODE_ENV=production \
+    PORT=4000
+WORKDIR /app
+COPY --from=deps --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node backend/package.json ./
+COPY --chown=node:node backend/src ./src
+# Never run as root inside the container.
+USER node
+EXPOSE 4000
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:${PORT}/api/health/live || exit 1
+# Same image runs the API (default) or the BullMQ worker (command override).
+CMD ["node", "src/index.js"]
