@@ -1,25 +1,41 @@
 name: CI/CD
 
+# Branch -> environment/namespace mapping
+#   master          -> dev
+#   pre-release/v*  -> preprod
+#   release/v*      -> release
 on:
   push:
     branches:
       - master
       - "pre-release/v*"
       - "release/v*"
+  pull_request:
+    branches: [master]
   workflow_dispatch:
     inputs:
       rollback_namespace:
-        description: "Namespace to roll back (leave empty to skip)"
+        description: "Namespace to roll back (dev | preprod | release). Empty = no rollback."
         required: false
+      rollback_to_tag:
+        description: "Optional image tag to roll back to (e.g. master-1a2b3c4). Empty = previous ReplicaSet."
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a half-finished deployment
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_BACKEND: ${{ github.repository }}-backend
-  IMAGE_FRONTEND: ${{ github.repository }}-frontend
 
 jobs:
+  # ---------------------------------------------------------------- CI ----
   build-and-test:
-    if: github.event_name == 'push'
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +43,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
 
       - name: Install backend dependencies
         working-directory: backend
@@ -36,18 +56,28 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Backend build validation
+      - name: Backend build validation (syntax check every module)
         working-directory: backend
-        run: node --check src/index.js
+        run: for f in src/*.js; do node --check "$f"; done
 
       - name: Backend tests
         working-directory: backend
-        run: npm test --if-present
+        run: npm test
 
       - name: Frontend build
         working-directory: frontend
         run: npm run build
 
+      - name: Validate docker-compose.yml
+        run: cp .env.example .env && docker compose config -q
+
+      - name: Validate Kubernetes manifests (kubeconform)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -summary -strict -ignore-missing-schemas \
+            -ignore-filename-pattern 'kind-config' k8s/ observability/
+
+  # ------------------------------------------------------ build & push ----
   build-and-push:
     if: github.event_name == 'push'
     needs: build-and-test
@@ -55,26 +85,33 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       namespace: ${{ steps.meta.outputs.namespace }}
+      image_backend: ${{ steps.meta.outputs.image_backend }}
+      image_frontend: ${{ steps.meta.outputs.image_frontend }}
     steps:
       - uses: actions/checkout@v4
 
-      # Tag = <branch-name>-<short-sha> so every image is traceable back to
-      # the exact commit and branch that produced it.
-      - name: Compute image tag and target namespace
+      # Tag = <branch-name>-<short-sha>: every image traces back to the exact
+      # branch + commit that produced it. GHCR requires lowercase names.
+      - name: Compute image names, tag and target namespace
         id: meta
         run: |
           SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          SAFE_BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
+          SAFE_BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
+          REPO_LC=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
           echo "tag=${SAFE_BRANCH}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
+          echo "image_backend=${REGISTRY}/${REPO_LC}-backend" >> "$GITHUB_OUTPUT"
+          echo "image_frontend=${REGISTRY}/${REPO_LC}-frontend" >> "$GITHUB_OUTPUT"
           case "${GITHUB_REF_NAME}" in
-            master) echo "namespace=dev" >> "$GITHUB_OUTPUT" ;;
+            master)         echo "namespace=dev"     >> "$GITHUB_OUTPUT" ;;
             pre-release/v*) echo "namespace=preprod" >> "$GITHUB_OUTPUT" ;;
-            release/v*) echo "namespace=release" >> "$GITHUB_OUTPUT" ;;
+            release/v*)     echo "namespace=release" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unmapped branch ${GITHUB_REF_NAME}" && exit 1 ;;
           esac
 
+      - uses: docker/setup-buildx-action@v3
+
       # GITHUB_TOKEN is short-lived and scoped to this repo/run only - no
-      # long-lived registry credentials are stored anywhere in the repo.
+      # long-lived registry credentials are stored anywhere.
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -88,9 +125,11 @@ jobs:
           context: .
           file: Dockerfile.backend
           push: true
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.namespace }}-latest
+            ${{ steps.meta.outputs.image_backend }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image_backend }}:${{ steps.meta.outputs.namespace }}-latest
 
       - name: Build and push frontend image
         uses: docker/build-push-action@v6
@@ -98,63 +137,136 @@ jobs:
           context: .
           file: Dockerfile.frontend
           push: true
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.namespace }}-latest
+            ${{ steps.meta.outputs.image_frontend }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image_frontend }}:${{ steps.meta.outputs.namespace }}-latest
 
+  # ------------------------------------------------------------ deploy ----
   deploy:
     if: github.event_name == 'push'
     needs: build-and-push
     runs-on: ubuntu-latest
+    # GitHub Environments: "release" can require manual approval + its own
+    # scoped secrets (KUBECONFIG_B64, DB_PASSWORD) per environment.
     environment: ${{ needs.build-and-push.outputs.namespace }}
+    env:
+      NAMESPACE: ${{ needs.build-and-push.outputs.namespace }}
+      TAG: ${{ needs.build-and-push.outputs.tag }}
+      IMAGE_BACKEND: ${{ needs.build-and-push.outputs.image_backend }}
+      IMAGE_FRONTEND: ${{ needs.build-and-push.outputs.image_frontend }}
+      HAS_KUBECONFIG: ${{ secrets.KUBECONFIG_B64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
-      # KUBECONFIG_B64 is a base64-encoded kubeconfig stored as an encrypted
-      # GitHub Actions secret, scoped to a service account with access to
-      # only this cluster/namespace set - never printed or written to logs.
-      - name: Configure kubeconfig
+      # Real cluster: base64 kubeconfig stored as an encrypted Environment
+      # secret, bound to a ServiceAccount limited to the target namespace.
+      - name: Configure kubeconfig (real cluster)
+        if: env.HAS_KUBECONFIG == 'true'
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
 
-      - name: Deploy manifests to ${{ needs.build-and-push.outputs.namespace }}
-        env:
-          NAMESPACE: ${{ needs.build-and-push.outputs.namespace }}
-          TAG: ${{ needs.build-and-push.outputs.tag }}
+      # No cluster configured (e.g. the local-only assessment): deploy into an
+      # ephemeral kind cluster inside the runner as an end-to-end smoke test of
+      # the exact images and manifests that would ship.
+      - name: Create ephemeral kind cluster (smoke-test target)
+        if: env.HAS_KUBECONFIG != 'true'
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ci
+
+      - name: Render manifests for ${{ env.NAMESPACE }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/manifests
-          cp k8s/*.yaml /tmp/manifests/
+          # app-secrets.yaml holds dev-only values and is never shipped by CI.
+          find k8s -maxdepth 1 -name '*.yaml' ! -name 'app-secrets.yaml' -exec cp {} /tmp/manifests/ \;
+          cd /tmp/manifests
+          sed -i "s#ghcr.io/[^ ]*-backend:[^ ]*#${IMAGE_BACKEND}:${TAG}#"   backend-deployment.yaml bullmq-worker-deployment.yaml
+          sed -i "s#ghcr.io/[^ ]*-frontend:[^ ]*#${IMAGE_FRONTEND}:${TAG}#" frontend-deployment.yaml
+          sed -i "s/namespace: dev$/namespace: ${NAMESPACE}/; s/name: dev$/name: ${NAMESPACE}/; s/environment: dev$/environment: ${NAMESPACE}/" *.yaml
+          sed -i "s/\.dev\.svc\.cluster\.local/.${NAMESPACE}.svc.cluster.local/g" *.yaml
+          # PVs are cluster-scoped: one per environment.
+          sed -i "s/postgres-pv-dev/postgres-pv-${NAMESPACE}/; s#/data/postgres-dev#/data/postgres-${NAMESPACE}#" postgres-pv.yaml postgres-pvc.yaml
+          sed -i "s/host: node-react.local/host: ${NAMESPACE}.node-react.local/" ingress-dev.yaml
+          grep -h "image:" *.yaml
 
-          # Point the deployments at the image just built and pushed.
-          sed -i "s#ghcr.io/.*-backend:.*#${REGISTRY}/${IMAGE_BACKEND}:${TAG}#" /tmp/manifests/backend-deployment.yaml
-          sed -i "s#ghcr.io/.*-backend:.*#${REGISTRY}/${IMAGE_BACKEND}:${TAG}#" /tmp/manifests/bullmq-worker-deployment.yaml
-          sed -i "s#ghcr.io/.*-frontend:.*#${REGISTRY}/${IMAGE_FRONTEND}:${TAG}#" /tmp/manifests/frontend-deployment.yaml
-
-          # Re-target every manifest at the environment-specific namespace.
-          sed -i "s/namespace: dev/namespace: ${NAMESPACE}/" /tmp/manifests/*.yaml
-
+      - name: Create namespace and secrets from CI secrets
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          set -euo pipefail
           kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -n "${NAMESPACE}" -f /tmp/manifests/
-          kubectl rollout status -n "${NAMESPACE}" deployment/backend --timeout=120s
-          kubectl rollout status -n "${NAMESPACE}" deployment/frontend --timeout=120s
+          # Fall back to a random password only for the throwaway kind cluster.
+          if [ -z "${DB_PASSWORD}" ]; then DB_PASSWORD=$(openssl rand -hex 16); fi
+          kubectl create secret generic app-secrets -n "${NAMESPACE}" \
+            --from-literal=DB_USER=appuser \
+            --from-literal=DB_PASSWORD="${DB_PASSWORD}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          # Lets the cluster pull (possibly private) GHCR images.
+          kubectl create secret docker-registry ghcr-pull -n "${NAMESPACE}" \
+            --docker-server=ghcr.io --docker-username="${{ github.actor }}" \
+            --docker-password="${{ secrets.GITHUB_TOKEN }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl patch serviceaccount default -n "${NAMESPACE}" \
+            -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}'
 
+      - name: Deploy to ${{ env.NAMESPACE }}
+        run: |
+          set -euo pipefail
+          kubectl apply -f /tmp/manifests/
+          kubectl annotate deployment/backend deployment/frontend -n "${NAMESPACE}" \
+            kubernetes.io/change-cause="ci ${GITHUB_SHA::7} image ${TAG}" --overwrite
+          kubectl rollout status -n "${NAMESPACE}" deployment/postgres --timeout=300s
+          kubectl rollout status -n "${NAMESPACE}" deployment/backend  --timeout=300s
+          kubectl rollout status -n "${NAMESPACE}" deployment/frontend --timeout=300s
+
+      - name: Smoke test (API through the frontend proxy)
+        run: |
+          kubectl run smoke -n "${NAMESPACE}" --rm -i --restart=Never --image=curlimages/curl:8.10.1 -- \
+            sh -c "curl -sf http://frontend-service/api/health/ready && curl -sf -XPOST -H 'Content-Type: application/json' -d '{\"name\":\"ci-smoke\"}' http://frontend-service/api/items && curl -sf http://frontend-service/api/items"
+
+      # Automatic rollback if the new version never became healthy.
+      - name: Roll back on failure
+        if: failure() && env.HAS_KUBECONFIG == 'true'
+        run: |
+          kubectl rollout undo -n "${NAMESPACE}" deployment/backend  || true
+          kubectl rollout undo -n "${NAMESPACE}" deployment/frontend || true
+
+      - name: Show state
+        if: always()
+        run: kubectl get all -n "${NAMESPACE}"
+
+  # ------------------------------------------------- manual rollback ----
   rollback:
     if: github.event_name == 'workflow_dispatch' && inputs.rollback_namespace != ''
     runs-on: ubuntu-latest
+    environment: ${{ inputs.rollback_namespace }}
+    env:
+      NAMESPACE: ${{ inputs.rollback_namespace }}
+      TO_TAG: ${{ inputs.rollback_to_tag }}
     steps:
       - name: Configure kubeconfig
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
 
-      # Fast path: undo the last rollout. The slower/more precise path is
-      # re-running this workflow with a previous commit checked out, which
-      # rebuilds and redeploys that exact previous image tag.
-      - name: Roll back last deployment
-        env:
-          NAMESPACE: ${{ inputs.rollback_namespace }}
+      # Option A (default): previous ReplicaSet via `kubectl rollout undo`.
+      # Option B: pin an exact, already-built immutable tag from GHCR.
+      - name: Roll back
         run: |
-          kubectl rollout undo -n "${NAMESPACE}" deployment/backend
-          kubectl rollout undo -n "${NAMESPACE}" deployment/frontend
+          set -euo pipefail
+          if [ -z "${TO_TAG}" ]; then
+            kubectl rollout undo -n "${NAMESPACE}" deployment/backend
+            kubectl rollout undo -n "${NAMESPACE}" deployment/frontend
+          else
+            REPO_LC=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+            kubectl set image -n "${NAMESPACE}" deployment/backend  backend=ghcr.io/${REPO_LC}-backend:${TO_TAG}
+            kubectl set image -n "${NAMESPACE}" deployment/frontend frontend=ghcr.io/${REPO_LC}-frontend:${TO_TAG}
+          fi
+          kubectl rollout status -n "${NAMESPACE}" deployment/backend  --timeout=300s
+          kubectl rollout status -n "${NAMESPACE}" deployment/frontend --timeout=300s
