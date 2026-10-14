@@ -1,0 +1,7 @@
+# Observability lives in its own namespace, separate from the app (dev).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
