@@ -1,0 +1,54 @@
+# OpenSearch, single-node dev mode (security plugin off => internal only!).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: search
+  namespace: dev
+  labels:
+    app: search
+    tier: platform
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: search
+  template:
+    metadata:
+      labels:
+        app: search
+        tier: platform
+    spec:
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.15.0
+          ports:
+            - name: http
+              containerPort: 9200
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: DISABLE_SECURITY_PLUGIN
+              value: "true"
+            - name: DISABLE_INSTALL_DEMO_CONFIG
+              value: "true"
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+          readinessProbe:
+            httpGet: { path: /_cluster/health, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 200m, memory: 768Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/opensearch/data
+      volumes:
+        - name: data
+          emptyDir: {}   # dev only: index can be rebuilt from Postgres via the queue
