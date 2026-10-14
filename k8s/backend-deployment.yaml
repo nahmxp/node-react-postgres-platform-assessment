@@ -22,6 +22,10 @@ spec:
       labels:
         app: backend
         tier: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4000"
+        prometheus.io/path: /metrics
     spec:
       securityContext:
         runAsNonRoot: true

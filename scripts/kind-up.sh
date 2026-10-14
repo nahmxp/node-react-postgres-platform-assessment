@@ -21,6 +21,9 @@ kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/cont
 kubectl wait -n ingress-nginx --for=condition=ready pod \
   -l app.kubernetes.io/component=controller --timeout=420s
 
+# Return 429 (not the default 503) when the Ingress rate limit is hit.
+kubectl patch configmap ingress-nginx-controller -n ingress-nginx --type merge   -p '{"data":{"limit-req-status-code":"429","limit-conn-status-code":"429"}}'
+
 echo ">> Installing metrics-server (needed by the HPA)"
 kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
 # kind's kubelet uses self-signed certs

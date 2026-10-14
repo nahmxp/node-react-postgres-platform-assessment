@@ -1,0 +1,154 @@
+# Prometheus: discovers pods via the Kubernetes API and scrapes the ones
+# annotated prometheus.io/scrape="true" (the backend). Alert rules included.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, endpoints, nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    rule_files:
+      - /etc/prometheus/alerts.yml
+    scrape_configs:
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [dev, preprod, release]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app
+  alerts.yml: |
+    groups:
+      - name: backend
+        rules:
+          - alert: BackendHighErrorRate
+            expr: |
+              sum(rate(http_requests_total{app="backend",status=~"5.."}[5m]))
+                / clamp_min(sum(rate(http_requests_total{app="backend"}[5m])), 1e-9) > 0.05
+            for: 5m
+            labels: { severity: page }
+            annotations:
+              summary: "More than 5% of backend requests are failing"
+          - alert: BackendHighLatencyP95
+            expr: |
+              histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{app="backend"}[5m]))) > 0.5
+            for: 10m
+            labels: { severity: warn }
+            annotations:
+              summary: "Backend p95 latency above 500ms"
+          - alert: BackendHighCPU
+            expr: |
+              avg(rate(backend_process_cpu_seconds_total{app="backend"}[5m])) > 0.4
+            for: 10m
+            labels: { severity: warn }
+            annotations:
+              summary: "Backend pods averaging >80% of their 500m CPU limit"
+          - alert: BackendNoTargets
+            expr: absent(up{app="backend"} == 1)
+            for: 2m
+            labels: { severity: page }
+            annotations:
+              summary: "No healthy backend pods are being scraped"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.54.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.retention.time=2d
+            - --web.enable-lifecycle
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
